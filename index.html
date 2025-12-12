@@ -1,0 +1,633 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能手写标签</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- QRCode Library -->
+    <script src="https://unpkg.com/qrcode@1.5.1/build/qrcode.js"></script>
+    
+    <!-- HTML2Canvas -->
+    <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;700&family=Long+Cang&family=Ma+Shan+Zheng&family=Noto+Sans+SC:wght@400;700&family=Zhi+Mang+Xing&display=swap" rel="stylesheet">
+
+    <style>
+        /* Custom Font Classes */
+        .font-sans-sc { font-family: 'Noto Sans SC', sans-serif; }
+        .font-ma-shan { font-family: 'Ma Shan Zheng', cursive; }
+        .font-zhi-mang { font-family: 'Zhi Mang Xing', cursive; }
+        .font-long-cang { font-family: 'Long Cang', cursive; }
+        .font-caveat { font-family: 'Caveat', cursive; }
+        
+        /* Glassmorphism Card */
+        .glass-card {
+            background: rgba(255, 255, 255, 0.75);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.5);
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15);
+        }
+
+        /* Seal Animation */
+        @keyframes stamp {
+            0% { transform: scale(3) rotate(20deg); opacity: 0; }
+            100% { transform: scale(1) rotate(-10deg); opacity: 0.8; }
+        }
+        .stamp-animate {
+            animation: stamp 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+            opacity: 0; 
+            animation-delay: 2s; /* Wait for particles to finish */
+        }
+        
+        /* Float Animation */
+        @keyframes floatIn {
+            0% { opacity: 0; transform: translateY(30px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+        .animate-float-in {
+            animation: floatIn 1s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+        }
+
+        /* Fullscreen Preview Overlay */
+        .preview-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            background: #fff;
+            overflow-y: auto; /* Allow scrolling for long content */
+        }
+        
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: rgba(156, 163, 175, 0.5);
+            border-radius: 20px;
+        }
+        
+        /* Fade In Animation for Real Text */
+        .fade-in-text {
+            animation: fadeIn 0.5s ease-out forwards;
+            animation-delay: 1.5s; /* Sync with particle settling */
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans-sc min-h-screen overflow-x-hidden">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Font Mapping for Canvas
+        const fontMap = {
+            'font-sans-sc': "'Noto Sans SC', sans-serif",
+            'font-ma-shan': "'Ma Shan Zheng', cursive",
+            'font-zhi-mang': "'Zhi Mang Xing', cursive",
+            'font-long-cang': "'Long Cang', cursive",
+            'font-caveat': "'Caveat', cursive"
+        };
+
+        // --- HELPER: WRAP TEXT FOR CANVAS ---
+        const wrapText = (ctx, text, maxWidth) => {
+            let lines = [];
+            const paragraphs = text.split('\n');
+            
+            paragraphs.forEach(paragraph => {
+                let line = '';
+                for (let n = 0; n < paragraph.length; n++) {
+                    const testLine = line + paragraph[n];
+                    const metrics = ctx.measureText(testLine);
+                    const testWidth = metrics.width;
+                    if (testWidth > maxWidth && n > 0) {
+                        lines.push(line);
+                        line = paragraph[n];
+                    } else {
+                        line = testLine;
+                    }
+                }
+                lines.push(line);
+            });
+            return lines;
+        };
+
+        // --- COMPONENT: PARTICLE TEXT (Adaptive Layout) ---
+        const ParticleText = ({ text, fontClass, color, fontSize }) => {
+            const canvasRef = useRef(null);
+
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                if (!canvas) return; 
+
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                let animationId;
+                let particles = [];
+                let textOpacity = 0; 
+                
+                const fontFamily = fontMap[fontClass] || 'sans-serif';
+                
+                const init = () => {
+                    if (animationId) cancelAnimationFrame(animationId);
+                    textOpacity = 0;
+                    
+                    const dpr = window.devicePixelRatio || 1;
+                    const rect = canvas.getBoundingClientRect();
+
+                    if (rect.width === 0 || rect.height === 0) return;
+
+                    canvas.width = rect.width * dpr;
+                    canvas.height = rect.height * dpr;
+                    ctx.scale(dpr, dpr);
+
+                    // Sync Font Settings with CSS
+                    const lineHeightRatio = 1.6;
+                    const lineHeight = fontSize * lineHeightRatio;
+                    
+                    const fontString = `${fontSize}px ${fontFamily.replace(/'/g, "")}`;
+                    ctx.font = fontString;
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+
+                    // Calculate Layout
+                    const maxWidth = rect.width;
+                    const lines = wrapText(ctx, text, maxWidth);
+                    
+                    const totalTextHeight = lines.length * lineHeight;
+                    const startY = (rect.height - totalTextHeight) / 2 + lineHeight / 2;
+                    const centerX = rect.width / 2;
+
+                    // 1. Draw Text to get pixels
+                    ctx.fillStyle = color;
+                    lines.forEach((line, i) => {
+                        ctx.fillText(line, centerX, startY + i * lineHeight);
+                    });
+
+                    // 2. Scan pixels
+                    try {
+                        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        const data = imageData.data;
+                        particles = [];
+                        ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+
+                        const step = 4; // Pixel skipping
+                        
+                        for (let y = 0; y < canvas.height; y += step) {
+                            for (let x = 0; x < canvas.width; x += step) {
+                                const index = (y * canvas.width + x) * 4;
+                                const alpha = data[index + 3];
+                                
+                                if (alpha > 128) {
+                                    particles.push({
+                                        x: Math.random() * canvas.width / dpr,
+                                        y: Math.random() * canvas.height / dpr,
+                                        targetX: x / dpr,
+                                        targetY: y / dpr,
+                                        vx: (Math.random() - 0.5) * 2,
+                                        vy: (Math.random() - 0.5) * 2,
+                                        color: color
+                                    });
+                                }
+                            }
+                        }
+                        animate();
+                    } catch (e) {
+                        console.error("Canvas Error:", e);
+                    }
+                };
+
+                const animate = () => {
+                    const dpr = window.devicePixelRatio || 1;
+                    ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+                    
+                    let settledCount = 0;
+                    
+                    particles.forEach(p => {
+                        const dx = p.targetX - p.x;
+                        const dy = p.targetY - p.y;
+                        p.x += dx * 0.08;
+                        p.y += dy * 0.08;
+                        ctx.fillStyle = p.color;
+                        ctx.fillRect(p.x, p.y, 2, 2);
+                        if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) settledCount++;
+                    });
+
+                    if (particles.length > 0 && settledCount < particles.length * 0.95) {
+                        animationId = requestAnimationFrame(animate);
+                    } else {
+                        ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+                    }
+                };
+                
+                document.fonts.ready.then(() => init());
+                window.addEventListener('resize', init);
+                return () => {
+                    cancelAnimationFrame(animationId);
+                    window.removeEventListener('resize', init);
+                };
+            }, [text, fontClass, color, fontSize]);
+
+            return <canvas ref={canvasRef} className="w-full h-full absolute inset-0 z-20 pointer-events-none" />;
+        };
+
+        // --- PARTICLE BACKGROUND COMPONENT ---
+        const ParticleBackground = ({ color = "#6366f1" }) => {
+            const canvasRef = useRef(null);
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                const ctx = canvas.getContext('2d');
+                let w, h;
+                const particles = [];
+                const particleCount = window.innerWidth < 768 ? 20 : 40;
+                
+                const resize = () => { w = canvas.width = window.innerWidth; h = canvas.height = window.innerHeight; };
+                window.addEventListener('resize', resize);
+                resize();
+
+                for (let i = 0; i < particleCount; i++) {
+                    particles.push({
+                        x: Math.random() * w, y: Math.random() * h,
+                        vx: (Math.random() - 0.5) * 0.5, vy: (Math.random() - 0.5) * 0.5
+                    });
+                }
+
+                const animate = () => {
+                    ctx.clearRect(0, 0, w, h);
+                    ctx.fillStyle = color;
+                    particles.forEach(p => {
+                        p.x += p.vx; p.y += p.vy;
+                        if (p.x < 0 || p.x > w) p.vx *= -1;
+                        if (p.y < 0 || p.y > h) p.vy *= -1;
+                        ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2); ctx.fill();
+                    });
+                    particles.forEach((a, i) => {
+                        particles.slice(i + 1).forEach(b => {
+                            const d = Math.hypot(a.x - b.x, a.y - b.y);
+                            if (d < 150) {
+                                ctx.strokeStyle = color; ctx.globalAlpha = 1 - d/150;
+                                ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+                            }
+                        });
+                    });
+                    requestAnimationFrame(animate);
+                };
+                animate();
+            }, [color]);
+            return <canvas ref={canvasRef} className="fixed top-0 left-0 w-full h-full pointer-events-none z-0" />;
+        };
+
+        function getQueryParams() {
+            const params = new URLSearchParams(window.location.search);
+            return {
+                mode: params.get('mode'),
+                text: params.get('text'),
+                font: params.get('font'),
+                layout: params.get('layout'),
+                bg: params.get('bg'),
+                color: params.get('color'),
+                seal: params.get('seal') === 'true',
+                size: params.get('size')
+            };
+        }
+        
+        // --- DATA URI GENERATOR ---
+        const generateDataUri = (text, font, layout, bg, color, hasSeal, fontSize) => {
+            const fontCssUrl = "https://fonts.googleapis.com/css2?family=Caveat:wght@400;700&family=Long+Cang&family=Ma+Shan+Zheng&family=Noto+Sans+SC:wght@400;700&family=Zhi+Mang+Xing&display=swap";
+            const fontFamily = fontMap[font] || 'sans-serif';
+            
+            // Minified HTML to save QR space
+            const htmlContent = `<!DOCTYPE html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Label</title><link href="${fontCssUrl}" rel="stylesheet"><style>body{margin:0;padding:20px;display:flex;justify-content:center;align-items:center;min-height:100vh;background:#f0f2f5;font-family:${fontFamily};position:relative;box-sizing:border-box}.bg-anim{position:absolute;top:0;left:0;width:100%;height:100%;z-index:-1;background:radial-gradient(circle,${bg}20 10%,transparent 10%);background-size:30px 30px;animation:move 20s linear infinite}@keyframes move{0%{background-position:0 0}100%{background-position:30px 30px}}.card{background:rgba(255,255,255,0.85);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);padding:40px;border-radius:16px;box-shadow:0 15px 35px rgba(0,0,0,0.1);text-align:center;width:100%;max-width:600px;border:1px solid rgba(255,255,255,0.6);position:relative;animation:up 0.8s ease-out;box-sizing:border-box}@keyframes up{from{transform:translateY(30px);opacity:0}to{transform:translateY(0);opacity:1}}.seal{position:absolute;bottom:20px;right:20px;width:60px;height:60px;border:3px solid #d00;border-radius:4px;color:#d00;font-size:32px;font-weight:bold;display:flex;align-items:center;justify-content:center;transform:rotate(-10deg);opacity:0.8;font-family:'Ma Shan Zheng',serif}</style><div class="bg-anim"></div><div class="card" style="color:${color}"><div style="font-size:${fontSize}px;line-height:1.6;white-space:pre-wrap;word-wrap:break-word">${text}</div>${hasSeal?'<div class="seal"><div style="border:1px solid #d00;width:54px;height:54px;display:flex;align-items:center;justify-content:center">政</div></div>':''}<div style="margin-top:30px;opacity:0.4;font-size:10px;text-transform:uppercase;letter-spacing:1px">Smart Label</div></div>`;
+            return `data:text/html;charset=utf-8,${encodeURIComponent(htmlContent)}`;
+        };
+
+
+        // --- MAIN APP COMPONENT ---
+        function App() {
+            const query = getQueryParams();
+            const [viewMode, setViewMode] = useState(query.mode === 'view');
+            
+            const [text, setText] = useState(query.text ? decodeURIComponent(query.text) : "生活明朗\n万物可爱\n\n此处输入长文\n自动适应高度");
+            const [baseUrl, setBaseUrl] = useState("");
+            const [qrMode, setQrMode] = useState("data"); 
+            
+            const [selectedFont, setSelectedFont] = useState(query.font || "font-ma-shan");
+            const [cardColor, setCardColor] = useState(query.bg ? decodeURIComponent(query.bg) : "#ffffff");
+            const [textColor, setTextColor] = useState(query.color ? decodeURIComponent(query.color) : "#1e293b");
+            const [hasSeal, setHasSeal] = useState(query.seal || true);
+            const [baseFontSize, setBaseFontSize] = useState(query.size ? parseInt(query.size) : 48);
+
+            const [qrColor, setQrColor] = useState("#000000");
+            const [qrBgColor, setQrBgColor] = useState("#ffffff");
+            const [qrSize, setQrSize] = useState(150);
+            const [layout, setLayout] = useState(query.layout || "row");
+            
+            const [isDownloading, setIsDownloading] = useState(false);
+            const [isFullscreenPreview, setIsFullscreenPreview] = useState(false);
+            const [qrError, setQrError] = useState(false); // New: Handle overflow errors
+
+            const qrCanvasRef = useRef(null);
+            const cardRef = useRef(null);
+
+            const fonts = [
+                { id: 'font-ma-shan', name: '马善政毛笔' },
+                { id: 'font-zhi-mang', name: '智芒行书' },
+                { id: 'font-long-cang', name: '龙沧草书' },
+                { id: 'font-sans-sc', name: '标准黑体' },
+                { id: 'font-caveat', name: 'Caveat (English)' },
+            ];
+
+            useEffect(() => {
+                if (!viewMode && !baseUrl) setBaseUrl(window.location.href.split('?')[0]);
+            }, [viewMode]);
+
+            const generateWebLink = () => {
+                const params = new URLSearchParams();
+                params.set('mode', 'view');
+                params.set('text', encodeURIComponent(text));
+                params.set('font', selectedFont);
+                params.set('layout', layout);
+                params.set('bg', encodeURIComponent(cardColor));
+                params.set('color', encodeURIComponent(textColor));
+                params.set('seal', hasSeal);
+                params.set('size', baseFontSize);
+                return `${baseUrl}?${params.toString()}`;
+            };
+
+            const getFinalQrContent = () => {
+                if (qrMode === 'link') return generateWebLink();
+                if (qrMode === 'data') return generateDataUri(text, selectedFont, layout, cardColor, textColor, hasSeal, baseFontSize);
+                return text;
+            };
+
+            // SAFE QR GENERATION EFFECT
+            useEffect(() => {
+                if (!qrCanvasRef.current) return;
+                
+                // Reset Error State
+                setQrError(false);
+                
+                const content = getFinalQrContent() || " ";
+                
+                try {
+                    QRCode.toCanvas(qrCanvasRef.current, content, {
+                        width: qrSize * 2,
+                        margin: 1,
+                        color: { dark: qrColor, light: qrBgColor },
+                        errorCorrectionLevel: 'L'
+                    }, (error) => {
+                        if (error) {
+                            console.error("QR Generation Error (Async):", error);
+                            setQrError(true);
+                        }
+                    });
+                } catch (e) {
+                    console.error("QR Generation Error (Sync):", e);
+                    setQrError(true);
+                }
+            }, [text, selectedFont, layout, cardColor, textColor, hasSeal, qrMode, baseUrl, qrColor, qrBgColor, baseFontSize]);
+
+            const handleDownload = async () => {
+                if (!cardRef.current) return;
+                setIsDownloading(true);
+                try {
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                    const canvas = await html2canvas(cardRef.current, { scale: 3, backgroundColor: null, useCORS: true });
+                    const link = document.createElement('a');
+                    link.download = `Label_${Date.now()}.png`;
+                    link.href = canvas.toDataURL('image/png');
+                    link.click();
+                } catch(e) { alert("Error"); } 
+                finally { setIsDownloading(false); }
+            };
+
+            // --- VIEW COMPONENT ---
+            const LabelView = ({ isPreview = false, onClose }) => {
+                const [actualFontSize, setActualFontSize] = useState(baseFontSize);
+
+                useEffect(() => {
+                    const handleResize = () => {
+                        const scale = window.innerWidth < 640 ? 0.7 : 1;
+                        setActualFontSize(baseFontSize * scale);
+                    };
+                    handleResize();
+                    window.addEventListener('resize', handleResize);
+                    return () => window.removeEventListener('resize', handleResize);
+                }, [baseFontSize]);
+
+                return (
+                    <div className={`relative min-h-screen flex flex-col items-center justify-center p-6 ${isPreview ? 'z-50' : ''}`}>
+                        <ParticleBackground color={textColor === '#ffffff' ? '#ffffff' : '#94a3b8'} />
+                        
+                        <div 
+                            className={`glass-card relative p-10 rounded-2xl w-full max-w-2xl flex flex-col items-center text-center animate-float-in z-10 transition-all duration-500`}
+                            style={{ backgroundColor: isPreview ? `${cardColor}dd` : `${cardColor}dd`, color: textColor }}
+                        >
+                            <div className="relative w-full mb-8">
+                                <div 
+                                    className={`${selectedFont} break-words whitespace-pre-wrap opacity-0 fade-in-text pointer-events-none relative z-10`}
+                                    style={{ fontSize: `${actualFontSize}px`, lineHeight: 1.6 }}
+                                >
+                                    {text}
+                                </div>
+                                <div className="absolute inset-0">
+                                     <ParticleText text={text} fontClass={selectedFont} color={textColor} fontSize={actualFontSize} />
+                                </div>
+                            </div>
+                            
+                            <div className="w-16 h-1 bg-current opacity-20 rounded-full mb-6"></div>
+
+                            {hasSeal && (
+                                <div className="stamp-animate absolute bottom-6 right-6 border-2 border-red-700 rounded text-red-700 w-16 h-16 flex items-center justify-center rotate-[-12deg] opacity-80 mix-blend-multiply">
+                                    <div className="border border-red-700 w-[54px] h-[54px] flex items-center justify-center rounded-sm">
+                                        <span className="font-ma-shan text-3xl font-bold">政</span>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            <div className="text-[10px] opacity-40 font-sans-sc tracking-widest uppercase mt-4">
+                                Smart Label Design
+                            </div>
+                        </div>
+
+                        {isPreview && (
+                            <button 
+                                onClick={onClose}
+                                className="fixed top-6 right-6 bg-white/20 backdrop-blur-md text-white rounded-full p-3 hover:bg-white/30 transition-all z-50 border border-white/20 shadow-lg group"
+                            >
+                                <svg className="w-6 h-6 group-hover:rotate-90 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                            </button>
+                        )}
+                    </div>
+                );
+            };
+
+            if (viewMode) return <LabelView />;
+
+            return (
+                <div className="min-h-screen bg-slate-50 relative">
+                    {isFullscreenPreview && (
+                        <div className="preview-overlay">
+                            <LabelView isPreview={true} onClose={() => setIsFullscreenPreview(false)} />
+                        </div>
+                    )}
+
+                    <div className="container mx-auto px-4 py-8 max-w-6xl relative z-10">
+                        <header className="mb-8 text-center">
+                            <h1 className="text-4xl font-bold text-slate-800 mb-2 tracking-tight">✨ 智能标签工坊</h1>
+                            <p className="text-slate-500">字号可调 · 自适应 · 粒子特效</p>
+                        </header>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                            <div className="lg:col-span-4 space-y-6 bg-white/80 backdrop-blur-lg p-6 rounded-2xl shadow-xl border border-white/50">
+                                <div>
+                                    <label className="block text-sm font-bold text-slate-700 mb-2">🏷️ 内容编辑</label>
+                                    <textarea value={text} onChange={(e) => setText(e.target.value)} rows="6" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all shadow-inner"></textarea>
+                                </div>
+                                
+                                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                                    <div className="flex justify-between items-center mb-2">
+                                        <label className="text-sm font-bold text-slate-700">🔠 字号大小</label>
+                                        <span className="text-xs font-mono bg-slate-200 px-2 py-0.5 rounded text-slate-600">{baseFontSize}px</span>
+                                    </div>
+                                    <input 
+                                        type="range" 
+                                        min="20" 
+                                        max="120" 
+                                        step="2"
+                                        value={baseFontSize} 
+                                        onChange={(e) => setBaseFontSize(Number(e.target.value))}
+                                        className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                                    />
+                                    <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+                                        <span>小 (20px)</span>
+                                        <span>大 (120px)</span>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-bold text-slate-700 mb-2">✒️ 字体风格</label>
+                                    <div className="grid grid-cols-1 gap-2 max-h-40 overflow-y-auto pr-1 custom-scrollbar">
+                                        {fonts.map(font => (
+                                            <button key={font.id} onClick={() => setSelectedFont(font.id)} className={`px-4 py-2 text-left rounded-lg border transition-all flex justify-between items-center ${selectedFont === font.id ? 'border-indigo-500 bg-indigo-50 text-indigo-700 ring-1 ring-indigo-500' : 'border-slate-100 hover:bg-slate-50'}`}>
+                                                <span className={`${font.id} text-lg`}>{font.name}</span>
+                                                {selectedFont === font.id && <span className="text-indigo-500">●</span>}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="bg-indigo-50/80 p-4 rounded-xl border border-indigo-100">
+                                    <label className="block text-sm font-bold text-indigo-900 mb-3">🛠️ 生成模式</label>
+                                    <div className="space-y-2">
+                                        <label className="flex items-center cursor-pointer">
+                                            <input type="radio" checked={qrMode === 'data'} onChange={() => setQrMode('data')} className="text-indigo-600 focus:ring-indigo-500"/>
+                                            <span className="ml-2 text-sm text-slate-800">🚀 免部署 (静态特效)</span>
+                                        </label>
+                                        <label className="flex items-center cursor-pointer">
+                                            <input type="radio" checked={qrMode === 'link'} onChange={() => setQrMode('link')} className="text-indigo-600 focus:ring-indigo-500"/>
+                                            <span className="ml-2 text-sm text-slate-800">🔗 GitHub Pages (聚散粒子)</span>
+                                        </label>
+                                        {qrMode === 'link' && (
+                                            <input type="text" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} className="mt-2 w-full px-2 py-1.5 text-xs border border-indigo-200 rounded bg-white text-slate-600" placeholder="粘贴你的 GitHub Pages 网址..." />
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 mb-1">背景色</label>
+                                        <div className="flex items-center space-x-2 bg-slate-50 p-1 rounded-lg border border-slate-200">
+                                            <input type="color" value={cardColor} onChange={(e) => setCardColor(e.target.value)} className="w-6 h-6 rounded cursor-pointer border-none bg-transparent" />
+                                            <span className="text-xs text-slate-400 font-mono">{cardColor}</span>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-500 mb-1">文字色</label>
+                                        <div className="flex items-center space-x-2 bg-slate-50 p-1 rounded-lg border border-slate-200">
+                                            <input type="color" value={textColor} onChange={(e) => setTextColor(e.target.value)} className="w-6 h-6 rounded cursor-pointer border-none bg-transparent" />
+                                            <span className="text-xs text-slate-400 font-mono">{textColor}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="flex items-center justify-between pt-2">
+                                    <span className="text-sm font-bold text-slate-700">🏮 印章 (政)</span>
+                                    <label className="relative inline-flex items-center cursor-pointer">
+                                        <input type="checkbox" checked={hasSeal} onChange={(e) => setHasSeal(e.target.checked)} className="sr-only peer" />
+                                        <div className="w-11 h-6 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-red-500"></div>
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            <div className="lg:col-span-8 flex flex-col items-center">
+                                <div className="w-full flex justify-between items-center mb-4 px-1">
+                                    <h2 className="font-bold text-slate-700 flex items-center"><span className="w-2 h-2 bg-green-500 rounded-full mr-2 animate-pulse"></span>实时预览</h2>
+                                    <div className="space-x-3">
+                                        <button onClick={() => setIsFullscreenPreview(true)} className="bg-white text-slate-700 border border-slate-200 px-4 py-2 rounded-lg text-sm font-medium hover:bg-slate-50 transition-all shadow-sm flex items-center inline-flex">
+                                            <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" /></svg>全屏预览 (特效)
+                                        </button>
+                                        <button onClick={handleDownload} disabled={isDownloading} className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-2 rounded-lg text-sm font-medium shadow-lg hover:shadow-indigo-500/30 transition-all transform hover:-translate-y-0.5 active:translate-y-0">
+                                            {isDownloading ? "处理中..." : "下载标签图片"}
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="bg-slate-200/50 p-8 rounded-2xl w-full flex justify-center items-center overflow-hidden border border-slate-300 relative min-h-[600px]">
+                                    <div className="absolute inset-0 opacity-50 overflow-hidden pointer-events-none"><ParticleBackground color="#94a3b8" /></div>
+                                    <div ref={cardRef} style={{ backgroundColor: cardColor, color: textColor }} className={`relative glass-card shadow-2xl p-8 transition-all flex ${layout === 'col' ? 'flex-col text-center' : 'flex-row text-left items-center'} gap-8 max-w-2xl border-white/40 z-10`}>
+                                        <div className={`flex-1 min-w-[200px] ${selectedFont} break-words whitespace-pre-wrap`}>
+                                            <div style={{ lineHeight: '1.6', fontSize: `${baseFontSize}px` }}>{text}</div>
+                                        </div>
+                                        {layout === 'row' ? <div className="w-px h-32 bg-current opacity-20"></div> : <div className="h-px w-32 bg-current opacity-20 mx-auto"></div>}
+                                        
+                                        <div className="flex-shrink-0 bg-white/90 p-3 rounded-xl shadow-inner flex flex-col items-center gap-2 backdrop-blur-sm relative overflow-hidden">
+                                            {qrError ? (
+                                                <div style={{ width: `${qrSize}px`, height: `${qrSize}px` }} className="flex flex-col items-center justify-center bg-red-50 text-red-600 text-center p-2">
+                                                    <svg className="w-8 h-8 mb-1" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+                                                    <span className="text-xs font-bold leading-tight">数据量过大<br/>请切换模式</span>
+                                                </div>
+                                            ) : (
+                                                <canvas ref={qrCanvasRef} style={{ width: `${qrSize}px`, height: `${qrSize}px` }}></canvas>
+                                            )}
+                                            <span className="text-[10px] text-slate-500 font-mono font-bold tracking-tight mt-2">{qrMode === 'data' ? 'SCAN ME' : qrMode === 'link' ? 'WEB LINK' : 'TEXT'}</span>
+                                        </div>
+
+                                        {hasSeal && (
+                                            <div className="absolute top-4 left-4 border border-red-800/30 rounded-sm w-8 h-8 flex items-center justify-center opacity-60 rotate-12">
+                                                <span className="text-[12px] text-red-800 font-ma-shan font-bold">政</span>
+                                            </div>
+                                        )}
+                                        <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 bg-slate-100 rounded-full border border-slate-300 shadow-inner z-20"></div>
+                                    </div>
+                                </div>
+                                <p className="mt-4 text-xs text-slate-400">提示：点击“全屏预览”可查看粒子聚字特效。如果二维码显示报错，请减少字数或切换到 GitHub Pages 模式。</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
